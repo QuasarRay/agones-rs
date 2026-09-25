@@ -1,0 +1,96 @@
+---
+# Copyright Contributors to Agones a Series of LF Projects, LLC.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+steps:
+
+  #
+  # Clean out the working dir, so we can replace it.
+  #
+  - name: ubuntu
+    script: rm *
+
+  #
+  # Shallow clone of the release-{x.y.z} branch from the Agones repository.
+  #
+  - name: gcr.io/cloud-builders/git
+    id: clone
+    args:
+      - clone
+      - --depth=1
+      - --branch=${_BRANCH_NAME}
+      - https://github.com/agones-dev/agones.git
+      - .
+
+  #
+  # Creates the initial make + docker build platform.
+  # This image is used to run subsequent 'make' commands.
+  #
+  - name: ubuntu
+    args:
+      - bash
+      - -c
+      - "echo 'FROM gcr.io/cloud-builders/docker:24.0.9\nRUN apt-get install make\nENTRYPOINT\
+        \ [\"/usr/bin/make\"]' > Dockerfile.build"
+  - name: gcr.io/cloud-builders/docker:24.0.9
+    id: build-make-docker
+    args: [build, -f, Dockerfile.build, -t, make-docker, .]
+
+  #
+  # Pull the build environment image if it exists.
+  # This image contains all the tools needed to run the build and test commands.
+  #
+  - name: make-docker
+    id: pull-build-image
+    dir: build
+    env: ['REGISTRY=us-docker.pkg.dev/${PROJECT_ID}/ci']
+    args: [pull-build-image]
+    waitFor:
+      - build-make-docker
+
+  #
+  # Build the build environment image if we were unable to pull it.
+  #
+  - name: "make-docker"
+    id: "ensure-build-image"
+    dir: "build"
+    args: ["ensure-build-image"]
+    waitFor:
+      - pull-build-image
+
+  #
+  # Ensure example images exists. Requires build image to exist in Cloudbuild environment.
+  #
+  - name: make-docker
+    id: test-examples-on-gar
+    dir: build
+    env:
+      - REGISTRY=us-docker.pkg.dev/${PROJECT_ID}
+      - DOCKER_RUN_ARGS=--network=cloudbuild
+    args: [test-examples-on-gar]
+    waitFor:
+      - ensure-build-image
+
+  #
+  # Deploys the site by taking in the base version and deploying the previous version.
+  #
+  - name: make-docker
+    id: release-deploy-site
+    dir: build
+    env:
+      - VERSION=${_VERSION}
+      - DOCKER_RUN_ARGS=--network=cloudbuild
+    args: [release-deploy-site]
+    waitFor:
+      - test-examples-on-gar
+timeout: 5400s
